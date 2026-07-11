@@ -1,8 +1,60 @@
 import streamlit as st
 import pandas as pd
 from utils.prediction import pipeline_load_predict, make_prediction
-import sklearn
-import sys
+from utils.shap import load_shape
+import shap
+from matplotlib import pyplot as plt
+
+
+#VARIABLES
+pipeline = pipeline_load_predict() #Chargement du pipeline
+explainer, shap_values, expected_value, dataset = load_shape() #Chargement des infos d'explicabilité Shap
+
+
+resultsOk = False
+pred = 0.0 #resultat(classe) de la prediction
+proba = 0.0 #probabilite de la classe
+
+
+#FONCTIONS
+#Fonction d'enregistrement des données de prediction
+def save_prediction_data():
+    data = pd.DataFrame(
+        [{
+            "annual_income" : st.session_state.annual_income,
+            "debt_to_income_ratio" : st.session_state.debt_to_income_ratio,
+            "credit_score" : st.session_state.credit_score,
+            "loan_amount" : st.session_state.loan_amount,
+            "interest_rate" : st.session_state.interest_rate,
+            "gender" : st.session_state.gender,
+            "marital_status" : st.session_state.marital_status,
+            "education_level" : st.session_state.education_level,
+            "employment_status" : st.session_state.employment_status,
+            "loan_purpose" : st.session_state.loan_purpose,
+            "grade_subgrade" : st.session_state.grade_subgrade
+        }]
+    )
+    return data
+
+#fonction d'affichage du waterfall plot pour lexplicabilité d'un client
+def print_waterfall(client):
+    encoded_client = pipeline['preprocessing'].transform(client)
+    shap_values_client = explainer.shap_values(encoded_client)
+    if isinstance(shap_values_client, list):
+        shap_values_client = shap_values_client[1]
+    
+    shap.waterfall_plot(shap.Explanation(
+        values=shap_values_client[0],
+        base_values=expected_value,
+        data=encoded_client[0],
+        feature_names=dataset.columns
+    ), max_display = 10, show = False)
+    fig = plt.gcf()
+    st.pyplot(fig, bbox_inches = 'tight')
+    plt.close(fig)
+
+
+#INTERFACE
 
 st.title("💳 Loan Prediction")
 st.layout = "wide"
@@ -19,10 +71,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-pipeline = pipeline_load_predict() #Chargement du pipeline
 
-st.write(sklearn.__version__)
-st.write(sys.executable)
 st.markdown("#### Entrer les informations du client dont vous souhaitez avoir une prédiction")
 
 col1, col2 = st.columns(2)
@@ -54,30 +103,64 @@ with col4:
 
 st.divider()
 
-#Fonction d'enregistrement des données de prediction
-def save_prediction_data():
-    data = pd.DataFrame(
-        [{
-            "annual_income" : st.session_state.annual_income,
-            "debt_to_income_ratio" : st.session_state.debt_to_income_ratio,
-            "credit_score" : st.session_state.credit_score,
-            "loan_amount" : st.session_state.loan_amount,
-            "interest_rate" : st.session_state.interest_rate,
-            "gender" : st.session_state.gender,
-            "marital_status" : st.session_state.marital_status,
-            "education_level" : st.session_state.education_level,
-            "employment_status" : st.session_state.employment_status,
-            "loan_purpose" : st.session_state.loan_purpose,
-            "grade_subgrade" : st.session_state.grade_subgrade
-        }]
-    )
-    return data
-
-
-
 if st.button("🔮 Predict"):
-    st.success("Prediction will appear here after model integration")
-    prediction_data = save_prediction_data()
-    pred, proba = make_prediction(pipeline, prediction_data)
-    st.write(f"{pred}, {proba} ")
-    st.info("Next step: connect your LightGBM pipeline")
+    data_client = save_prediction_data()
+    pred, proba = make_prediction(pipeline, data_client)
+    print(pred, proba)
+    if pred or proba:
+        st.success("Prédiction effectuée")
+        resultsOk = True
+    else :
+        st.error("Une erreur est survenue")
+    
+    
+    #resultats
+    if resultsOk:
+        st.markdown("#### Décision + Score")
+        proba_defaut = 1 - proba
+        if proba >= 0.7 :
+            st.markdown("##### ✅ CREDIT ACCORDE")
+            st.metric(label="Probabilité de remboursement", value =f"{proba * 100:.2f}%")
+            st.metric(label="Probalite de defaut", value=f"{proba_defaut * 100:.2f}%")
+        elif proba >= 0.5 and proba < 0.7 :
+            st.markdown("##### ⚠️ A ETUDIER")
+            st.metric(label="Probabilité de remboursement", value =f"{proba * 100:.2f}%")
+            st.metric(label="Probalite de defaut", value=f"{proba_defaut * 100:.2f}%")
+        elif proba < 0.5 :
+            st.markdown("##### ❌ CREDIT REFUSE")
+            st.metric(label="Probabilité de remboursement", value =f"{proba * 100:.2f}%")
+            st.metric(label="Probalite de defaut", value=f"{proba_defaut * 100:.2f}%")
+
+    # ==========================================================
+    # EXPLICATION LOCALE DE LA PRÉDICTION
+    # ==========================================================
+
+    st.subheader("🧠 Explication de la décision du modèle")
+
+    st.markdown("""
+    Le graphique ci-dessous présente une **explication locale** de la prédiction réalisée pour cet emprunteur à l'aide des valeurs **SHAP (SHapley Additive exPlanations)**.
+
+    Il montre comment chaque caractéristique du client influence progressivement la décision du modèle jusqu'à obtenir la probabilité finale de remboursement.
+    """)
+
+    st.caption(
+        "💡 Chaque variable contribue positivement ou négativement à la prédiction finale du modèle."
+    )
+
+    print_waterfall(data_client)
+
+    st.info("""
+    ### 📖 Comment interpréter ce graphique ?
+
+    Le graphique Waterfall décompose la prédiction du modèle en montrant la contribution de chaque variable.
+
+    - 🔴 **Barres rouges** : représentent les variables qui **augmentent le risque de défaut de remboursement**. Elles orientent donc la prédiction vers un **non-remboursement** du prêt.
+
+    - 🔵 **Barres bleues** : représentent les variables qui **réduisent le risque de défaut** et favorisent ainsi la prédiction d'un **remboursement effectif**.
+
+    - 📏 **La longueur de chaque barre** traduit l'importance de l'influence de la variable sur la décision du modèle : plus la barre est longue, plus son impact est significatif.
+
+    - 🎯 **La somme de toutes les contributions** permet de passer de la prédiction moyenne du modèle (valeur de base) à la probabilité finale affichée pour cet emprunteur.
+
+    Cette visualisation permet ainsi de comprendre précisément **pour quelles raisons le modèle considère qu'un client présente un risque élevé ou faible de défaut de remboursement**.
+    """)
